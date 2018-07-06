@@ -149,15 +149,15 @@ class MessageBus::Client
     end
 
     # stats message for all newly subscribed
-    status_message = nil
-    @subscriptions.each do |k, v|
-      if v.to_i == -1 || (new_message_ids && new_message_ids[k])
-        status_message ||= {}
-        @subscriptions[k] = status_message[k] = @bus.last_id(k, site_id)
-      end
-    end
-
-    r << MessageBus::Message.new(-1, -1, '/__status', status_message) if status_message
+    # status_message = nil
+    # @subscriptions.each do |k, v|
+    #   if v.to_i == -1 || (new_message_ids && new_message_ids[k])
+    #     status_message ||= {}
+    #     @subscriptions[k] = status_message[k] = @bus.last_id(k, site_id)
+    #   end
+    # end
+    #
+    # r << MessageBus::Message.new(-1, -1, '/__status', status_message) if status_message
 
     r || []
   end
