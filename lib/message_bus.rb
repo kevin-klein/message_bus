@@ -410,7 +410,7 @@ module MessageBus::Implementation
 
     raise MessageBus::BusDestroyed if @destroyed
 
-    if last_id >= 0
+    if last_id >= 0 && last_id <= last_message(channel)
       # this gets a bit tricky, but we got to ensure ordering so we wrap the block
       original_blk = blk
       current_id = replay_backlog(channel, last_id, site_id, &blk)
