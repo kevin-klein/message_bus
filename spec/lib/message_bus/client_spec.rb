@@ -127,34 +127,6 @@ describe MessageBus::Client do
       log[0].data.must_equal("sam")
     end
 
-    it "provides status" do
-      @client.subscribe('/hello', -1)
-      log = @client.backlog
-      log.length.must_equal 1
-      log[0].data.must_equal("/hello" => 0)
-    end
-
-    it 'provides status updates to clients that are not allowed to a message' do
-      another_client = setup_client('def')
-      clients = [@client, another_client]
-
-      channel = SecureRandom.hex
-
-      clients.each { |client| client.subscribe(channel, nil) }
-
-      @bus.publish(channel, "world", client_ids: ['abc'])
-
-      log = @client.backlog
-      log.length.must_equal 1
-      log[0].channel.must_equal channel
-      log[0].data.must_equal 'world'
-
-      log = another_client.backlog
-      log.length.must_equal 1
-      log[0].channel.must_equal '/__status'
-      log[0].data.must_equal(channel => 1)
-    end
-
     it "should provide a list of subscriptions" do
       @client.subscribe('/hello', nil)
       @client.subscriptions['/hello'].wont_equal nil

@@ -67,15 +67,6 @@ describe MessageBus::Rack::Middleware do
       last_response.not_found?.must_equal true
     end
 
-    it "should respond right away to long polls that are polling on -1 with the last_id" do
-      post "/message-bus/ABC", '/foo' => -1
-      last_response.ok?.must_equal true
-      parsed = JSON.parse(last_response.body)
-      parsed.length.must_equal 1
-      parsed[0]["channel"].must_equal "/__status"
-      parsed[0]["data"]["/foo"].must_equal @bus.last_id("/foo")
-    end
-
     it "should respond to long polls when data is available" do
       middleware = @async_middleware
       bus = @bus
