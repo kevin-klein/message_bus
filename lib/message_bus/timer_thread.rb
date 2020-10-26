@@ -1,14 +1,22 @@
 # frozen_string_literal: true
-class MessageBus::TimerThread
 
+class MessageBus::TimerThread
   attr_reader :jobs
 
   class Cancelable
-    NOOP = proc {}
+    class NoOp
+      def call
+      end
+    end
+
+    # usually you could just use a blank lambda
+    # but an object is ever so slightly faster
+    NOOP = NoOp.new
 
     def initialize(job)
       @job = job
     end
+
     def cancel
       @job[1] = NOOP
     end
@@ -37,7 +45,14 @@ class MessageBus::TimerThread
     while running
       @mutex.synchronize do
         running = @thread && @thread.alive?
-        @thread.wakeup if running
+
+        if running
+          begin
+            @thread.wakeup
+          rescue ThreadError
+            raise if @thread.alive?
+          end
+        end
       end
       sleep 0
     end
@@ -58,7 +73,7 @@ class MessageBus::TimerThread
 
   # queue a block to run after a certain delay (in seconds)
   def queue(delay = 0, &block)
-    queue_time = Time.new.to_f + delay
+    queue_time = Process.clock_gettime(Process::CLOCK_MONOTONIC) + delay
     job = [queue_time, block]
 
     @mutex.synchronize do
@@ -96,7 +111,7 @@ class MessageBus::TimerThread
 
   def do_work
     while !@stopped
-      if @next && @next <= Time.new.to_f
+      if @next && @next <= Process.clock_gettime(Process::CLOCK_MONOTONIC)
         _, blk = @mutex.synchronize { @jobs.shift }
         begin
           blk.call
@@ -107,14 +122,13 @@ class MessageBus::TimerThread
           @next, _ = @jobs[0]
         end
       end
-      unless @next && @next <= Time.new.to_f
+      unless @next && @next <= Process.clock_gettime(Process::CLOCK_MONOTONIC)
         sleep_time = 1000
         @mutex.synchronize do
-          sleep_time = @next - Time.new.to_f if @next
+          sleep_time = @next - Process.clock_gettime(Process::CLOCK_MONOTONIC) if @next
         end
         sleep [0, sleep_time].max
       end
     end
   end
-
 end

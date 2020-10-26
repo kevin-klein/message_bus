@@ -1,9 +1,10 @@
+# frozen_string_literal: true
+
 require_relative '../spec_helper'
 require 'message_bus'
 require 'redis'
 
 describe MessageBus do
-
   before do
     @bus = MessageBus::Instance.new
     @bus.site_id_lookup do
@@ -15,6 +16,42 @@ describe MessageBus do
   after do
     @bus.reset!
     @bus.destroy
+  end
+
+  it "can be turned off" do
+    @bus.off
+
+    @bus.off?.must_equal true
+  end
+
+  it "can call destroy twice" do
+    @bus.destroy
+    @bus.destroy
+  end
+
+  it "can be turned on after destroy" do
+    @bus.destroy
+
+    @bus.on
+
+    @bus.after_fork
+  end
+
+  describe "#base_route=" do
+    it "adds leading and trailing slashes" do
+      @bus.base_route = "my/base/route"
+      @bus.base_route.must_equal '/my/base/route/'
+    end
+
+    it "leaves existing leading and trailing slashes" do
+      @bus.base_route = "/my/base/route/"
+      @bus.base_route.must_equal '/my/base/route/'
+    end
+
+    it "removes duplicate slashes" do
+      @bus.base_route = "//my///base/route"
+      @bus.base_route.must_equal '/my/base/route/'
+    end
   end
 
   it "can subscribe from a point in time" do
@@ -59,11 +96,9 @@ describe MessageBus do
     wait_for(2000) { client_ids }
 
     client_ids.must_equal ['a', 'b']
-
   end
 
   it "should recover from a redis flush" do
-
     data = nil
     @bus.subscribe("/chuck") do |msg|
       data = msg.data
@@ -79,7 +114,24 @@ describe MessageBus do
     wait_for(2000) { data && data["yeager"] }
 
     data["yeager"].must_equal true
+  end
 
+  it "should recover from a backlog expiring" do
+    data = nil
+    @bus.subscribe("/chuck") do |msg|
+      data = msg.data
+    end
+    @bus.publish("/chuck", norris: true)
+    @bus.publish("/chuck", norris: true)
+    @bus.publish("/chuck", norris: true)
+
+    @bus.reliable_pub_sub.expire_all_backlogs!
+
+    @bus.publish("/chuck", yeager: true)
+
+    wait_for(2000) { data && data["yeager"] }
+
+    data["yeager"].must_equal true
   end
 
   it "should automatically decode hashed messages" do
@@ -111,7 +163,6 @@ describe MessageBus do
     site_id.must_equal 'magic'
     channel.must_equal '/chuck'
     user_ids.must_equal [1, 2, 3]
-
   end
 
   it "should get global messages if it subscribes to them" do
@@ -130,7 +181,6 @@ describe MessageBus do
     data.must_equal 'norris'
     site_id.must_equal 'magic'
     channel.must_equal '/chuck'
-
   end
 
   it "should have the ability to grab the backlog messages in the correct order" do
@@ -149,7 +199,13 @@ describe MessageBus do
     @bus.publish("/chuckles", "bar")
 
     @bus.backlog("/chuck").map { |i| i.data }.to_a.must_equal ['norris', 'foo']
+  end
 
+  it "should correctly restrict the backlog size of a channel" do
+    @bus.publish("/chuck", "norris")
+    @bus.publish("/chuck", "foo", max_backlog_size: 1)
+
+    @bus.backlog("/chuck").map { |i| i.data }.to_a.must_equal ['foo']
   end
 
   it "allows you to look up last_message" do
@@ -157,6 +213,26 @@ describe MessageBus do
     @bus.publish("/bob", "marley")
     @bus.last_message("/bob").data.must_equal "marley"
     assert_nil @bus.last_message("/nothing")
+  end
+
+  describe "#publish" do
+    it "allows publishing to a explicit site" do
+      data, site_id, channel = nil
+
+      @bus.subscribe do |msg|
+        data = msg.data
+        site_id = msg.site_id
+        channel = msg.channel
+      end
+
+      @bus.publish("/chuck", "norris", site_id: "law-and-order")
+
+      wait_for(2000) { data }
+
+      data.must_equal 'norris'
+      site_id.must_equal 'law-and-order'
+      channel.must_equal '/chuck'
+    end
   end
 
   describe "global subscriptions" do
@@ -173,7 +249,6 @@ describe MessageBus do
     end
 
     it "can subscribe globally" do
-
       data = nil
       @bus.subscribe do |message|
         data = message.data
@@ -186,7 +261,6 @@ describe MessageBus do
     end
 
     it "can subscribe to channel" do
-
       data = nil
       @bus.subscribe("/global/test") do |message|
         data = message.data
@@ -199,59 +273,84 @@ describe MessageBus do
     end
 
     it "should exception if publishing restricted messages to user" do
-      lambda do
+      assert_raises(MessageBus::InvalidMessage) do
         @bus.publish("/global/test", "test", user_ids: [1])
-      end.must_raise(MessageBus::InvalidMessage)
+      end
     end
 
     it "should exception if publishing restricted messages to group" do
-      lambda do
+      assert_raises(MessageBus::InvalidMessage) do
         @bus.publish("/global/test", "test", user_ids: [1])
-      end.must_raise(MessageBus::InvalidMessage)
+      end
     end
 
+    it "should raise if we publish to an empty group or user list" do
+      assert_raises(MessageBus::InvalidMessageTarget) do
+        @bus.publish "/foo", "bar", user_ids: []
+      end
+
+      assert_raises(MessageBus::InvalidMessageTarget) do
+        @bus.publish "/foo", "bar", group_ids: []
+      end
+
+      assert_raises(MessageBus::InvalidMessageTarget) do
+        @bus.publish "/foo", "bar", client_ids: []
+      end
+
+      assert_raises(MessageBus::InvalidMessageTarget) do
+        @bus.publish "/foo", "bar", group_ids: [], user_ids: [1]
+      end
+
+      assert_raises(MessageBus::InvalidMessageTarget) do
+        @bus.publish "/foo", "bar", group_ids: [1], user_ids: []
+      end
+    end
   end
 
-  unless MESSAGE_BUS_CONFIG[:backend] == :memory
-    it "should support forking properly do" do
-      data = []
-      @bus.subscribe do |msg|
-        data << msg.data
+  it "should support forking properly do" do
+    test_never :memory
+
+    data = []
+    @bus.subscribe do |msg|
+      data << msg.data
+    end
+
+    @bus.publish("/hello", "pre-fork")
+    wait_for(2000) { data.length > 0 }
+
+    if child = Process.fork
+      # The child was forked and we received its PID
+
+      # Wait for fork to finish so we're asserting that we can still publish after it has
+      Process.wait(child)
+
+      @bus.publish("/hello", "continuation")
+    else
+      begin
+        @bus.after_fork
+        @bus.publish("/hello", "from-fork")
+      ensure
+        exit!(0)
       end
+    end
 
-      @bus.publish("/hello", "world")
-      wait_for(2000) { data.length > 0 }
+    wait_for(2000) { data.length == 3 }
 
-      if child = Process.fork
+    data.must_equal(["pre-fork", "from-fork", "continuation"])
+  end
 
-        wait_for(2000) { data.include?("ready") }
-        data.must_include "ready"
+  describe '#register_client_message_filter' do
+    it 'should register the message filter correctly' do
+      @bus.register_client_message_filter('/test')
 
-        @bus.publish("/hello", "world1")
+      @bus.client_message_filters.must_equal([])
 
-        wait_for(2000) { data.include?("got it") }
-        data.must_include "got it"
-        Process.wait(child)
+      @bus.register_client_message_filter('/test') { puts "hello world" }
 
-      else
-        begin
-          @bus.after_fork
-          @bus.publish("/hello", "ready")
+      channel, blk = @bus.client_message_filters[0]
 
-          wait_for(2000) { data.include? "world1" }
-
-          if (data.include? "world1")
-            @bus.publish("/hello", "got it")
-          end
-
-          $stdout.reopen("/dev/null", "w")
-          $stderr.reopen("/dev/null", "w")
-
-        ensure
-          exit!(0)
-        end
-      end
-
+      blk.must_respond_to(:call)
+      channel.must_equal('/test')
     end
   end
 end

@@ -1,51 +1,17 @@
 # frozen_string_literal: true
+
 require 'json'
 
 # our little message bus, accepts long polling and polling
 module MessageBus::Rack; end
 
+# Accepts requests from subscribers, validates and authenticates them,
+# delivers existing messages from the backlog and informs a
+# `MessageBus::ConnectionManager` of a connection which is remaining open.
 class MessageBus::Rack::Middleware
-
-  def start_listener
-    unless @started_listener
-
-      thin = defined?(Thin::Server) && ObjectSpace.each_object(Thin::Server).to_a.first
-      thin_running = thin && thin.running?
-
-      @subscription = @bus.subscribe do |msg|
-        run = proc do
-          begin
-            @connection_manager.notify_clients(msg) if @connection_manager
-          rescue
-            @bus.logger.warn "Failed to notify clients: #{$!} #{$!.backtrace}"
-          end
-        end
-
-        if thin_running
-          EM.next_tick(&run)
-        else
-          @bus.timer.queue(&run)
-        end
-
-        @started_listener = true
-      end
-    end
-  end
-
-  def initialize(app, config = {})
-    @app = app
-    @bus = config[:message_bus] || MessageBus
-    @connection_manager = MessageBus::ConnectionManager.new(@bus)
-    self.start_listener
-  end
-
-  def stop_listener
-    if @subscription
-      @bus.unsubscribe(&@subscription)
-      @started_listener = false
-    end
-  end
-
+  # @param [Array<MessageBus::Message>] backlog a list of messages for delivery
+  # @return [JSON] a JSON representation of the backlog, compliant with the
+  #   subscriber API specification
   def self.backlog_to_json(backlog)
     m = backlog.map do |msg|
       {
@@ -58,23 +24,61 @@ class MessageBus::Rack::Middleware
     JSON.dump(m)
   end
 
+  # @return [Boolean] whether the message listener (subscriber) is started or not)
+  attr_reader :started_listener
+
+  # Sets up the middleware to receive subscriber client requests and begins
+  # listening for messages published on the bus for re-distribution (unless
+  # the bus is disabled).
+  #
+  # @param [Proc] app the rack app
+  # @param [Hash] config
+  # @option config [MessageBus::Instance] :message_bus (`MessageBus`) a specific instance of message_bus
+  def initialize(app, config = {})
+    @app = app
+    @bus = config[:message_bus] || MessageBus
+    @connection_manager = MessageBus::ConnectionManager.new(@bus)
+    @started_listener = false
+    @base_route = "#{@bus.base_route}message-bus/"
+    @base_route_length = @base_route.length
+    @diagnostics_route = "#{@base_route}_diagnostics"
+    @broadcast_route = "#{@base_route}broadcast"
+    start_listener unless @bus.off?
+  end
+
+  # Stops listening for messages on the bus
+  # @return [void]
+  def stop_listener
+    if @subscription
+      @bus.unsubscribe(&@subscription)
+      @started_listener = false
+    end
+  end
+
+  # Process an HTTP request from a subscriber client
+  # @param [Rack::Request::Env] env the request environment
   def call(env)
+    return @app.call(env) unless env['PATH_INFO'].start_with? @base_route
 
-    return @app.call(env) unless env['PATH_INFO'] =~ /^\/message-bus\//
+    handle_request(env)
+  end
 
+  private
+
+  def handle_request(env)
     # special debug/test route
-    if @bus.allow_broadcast? && env['PATH_INFO'] == '/message-bus/broadcast'
+    if @bus.allow_broadcast? && env['PATH_INFO'] == @broadcast_route
       parsed = Rack::Request.new(env)
       @bus.publish parsed["channel"], parsed["data"]
       return [200, { "Content-Type" => "text/html" }, ["sent"]]
     end
 
-    if env['PATH_INFO'].start_with? '/message-bus/_diagnostics'
+    if env['PATH_INFO'].start_with? @diagnostics_route
       diags = MessageBus::Rack::Diagnostics.new(@app, message_bus: @bus)
       return diags.call(env)
     end
 
-    client_id = env['PATH_INFO'].split("/")[2]
+    client_id = env['PATH_INFO'][@base_route_length..-1].split("/")[0]
     return [404, {}, ["not found"]] unless client_id
 
     user_id = @bus.user_id_lookup.call(env) if @bus.user_id_lookup
@@ -136,9 +140,9 @@ class MessageBus::Rack::Middleware
     backlog = client.backlog
 
     if backlog.length > 0 && !allow_chunked
-      client.cancel
+      client.close
       @bus.logger.debug "Delivering backlog #{backlog} to client #{client_id} for user #{user_id}"
-      [200, headers, [self.class.backlog_to_json(backlog)] ]
+      [200, headers, [self.class.backlog_to_json(backlog)]]
     elsif long_polling && env['rack.hijack'] && @bus.rack_hijack_enabled?
       io = env['rack.hijack'].call
       # TODO disable client till deliver backlog is called
@@ -182,7 +186,6 @@ class MessageBus::Rack::Middleware
     else
       [200, headers, [self.class.backlog_to_json(backlog)]]
     end
-
   rescue => e
     if @bus.on_middleware_error && result = @bus.on_middleware_error.call(env, e)
       result
@@ -206,12 +209,37 @@ class MessageBus::Rack::Middleware
 
     client.cleanup_timer = @bus.timer.queue(@bus.long_polling_interval.to_f / 1000) {
       begin
-        client.cleanup_timer = nil
-        client.ensure_closed!
+        client.close
         @connection_manager.remove_client(client)
       rescue
         @bus.logger.warn "Failed to clean up client properly: #{$!} #{$!.backtrace}"
       end
     }
+  end
+
+  def start_listener
+    unless @started_listener
+
+      thin = defined?(Thin::Server) && ObjectSpace.each_object(Thin::Server).to_a.first
+      thin_running = thin && thin.running?
+
+      @subscription = @bus.subscribe do |msg|
+        run = proc do
+          begin
+            @connection_manager.notify_clients(msg) if @connection_manager
+          rescue
+            @bus.logger.warn "Failed to notify clients: #{$!} #{$!.backtrace}"
+          end
+        end
+
+        if thin_running
+          EM.next_tick(&run)
+        else
+          @bus.timer.queue(&run)
+        end
+
+        @started_listener = true
+      end
+    end
   end
 end

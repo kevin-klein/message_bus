@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # A sample Guardfile
 # More info at https://github.com/guard/guard#readme
 
@@ -47,5 +48,4 @@ guard :rspec, cmd: "bundle exec rspec" do
   # Ruby files
   ruby = dsl.ruby
   dsl.watch_spec_files_for(ruby.lib_files)
-
 end

@@ -1,4 +1,5 @@
-Jasmine.configure do |config|
+# frozen_string_literal: true
+Jasmine.configure do |_config|
   # patch for travis
   if ENV['TRAVIS']
     module ::Phantomjs

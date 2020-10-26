@@ -1,62 +1,73 @@
 /*jshint bitwise: false*/
-(function(global, document, undefined) {
-  'use strict';
-  var previousMessageBus = global.MessageBus;
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define([], function (b) {
+      // Also create a global in case some scripts
+      // that are loaded still are looking for
+      // a global even when an AMD loader is in use.
+      return (root.MessageBus = factory());
+    });
+  } else {
+    // Browser globals
+    root.MessageBus = factory();
+  }
+}(typeof self !== 'undefined' ? self : this, function () {
+  "use strict";
 
   // http://stackoverflow.com/questions/105034/how-to-create-a-guid-uuid-in-javascript
-  var callbacks, clientId, failCount, shouldLongPoll, queue, responseCallbacks, uniqueId, baseUrl;
-  var me, started, stopped, longPoller, pollTimeout, paused, later, jQuery, interval, chunkedBackoff;
-  var delayPollTimeout;
-
-  var ajaxInProgress = false;
-
-  uniqueId = function() {
-    return 'xxxxxxxxxxxx4xxxyxxxxxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-      var r, v;
-      r = Math.random() * 16 | 0;
-      v = c === 'x' ? r : (r & 0x3 | 0x8);
+  var uniqueId = function() {
+    return "xxxxxxxxxxxx4xxxyxxxxxxxxxxxxxxx".replace(/[xy]/g, function(c) {
+      var r = (Math.random() * 16) | 0;
+      var v = c === "x" ? r : (r & 0x3) | 0x8;
       return v.toString(16);
     });
   };
 
-  clientId = uniqueId();
-  responseCallbacks = {};
-  callbacks = [];
-  queue = [];
-  interval = null;
-  failCount = 0;
-  baseUrl = "/";
-  paused = false;
-  later = [];
-  chunkedBackoff = 0;
-  jQuery = global.jQuery;
-  var hiddenProperty;
+  var me;
+  var delayPollTimeout;
+  var ajaxInProgress = false;
+  var started = false;
+  var clientId = uniqueId();
+  var callbacks = [];
+  var failCount = 0;
+  var baseUrl = "/";
+  var paused = false;
+  var later = [];
+  var chunkedBackoff = 0;
+  var stopped;
+  var pollTimeout = null;
+  var totalAjaxFailures = 0;
+  var totalAjaxCalls = 0;
+  var lastAjax;
 
-  (function(){
-    var prefixes = ["","webkit","ms","moz"];
-    for(var i=0; i<prefixes.length; i++) {
+  var isHidden = (function() {
+    var prefixes = ["", "webkit", "ms", "moz"];
+    var hiddenProperty;
+    for (var i = 0; i < prefixes.length; i++) {
       var prefix = prefixes[i];
       var check = prefix + (prefix === "" ? "hidden" : "Hidden");
-      if(document[check] !== undefined ){
+      if (document[check] !== undefined) {
         hiddenProperty = check;
       }
     }
-  })();
 
-  var isHidden = function() {
-    if (hiddenProperty !== undefined){
-      return document[hiddenProperty];
-    } else {
-      return !document.hasFocus;
-    }
-  };
+    return function() {
+      if (hiddenProperty !== undefined) {
+        return document[hiddenProperty];
+      } else {
+        return !document.hasFocus;
+      }
+    };
+  })();
 
   var hasLocalStorage = (function() {
     try {
       localStorage.setItem("mbTestLocalStorage", Date.now());
       localStorage.removeItem("mbTestLocalStorage");
       return true;
-    } catch(e) {
+    } catch (e) {
       return false;
     }
   })();
@@ -65,7 +76,7 @@
     if (hasLocalStorage) {
       localStorage.setItem("__mbLastAjax", Date.now());
     }
-  }
+  };
 
   var hiddenTabShouldWait = function() {
     if (hasLocalStorage && isHidden()) {
@@ -75,38 +86,39 @@
       return deltaAjax >= 0 && deltaAjax < me.minHiddenPollInterval;
     }
     return false;
-  }
+  };
 
-  var hasonprogress = (new XMLHttpRequest()).onprogress === null;
-  var allowChunked = function(){
+  var hasonprogress = new XMLHttpRequest().onprogress === null;
+  var allowChunked = function() {
     return me.enableChunkedEncoding && hasonprogress;
   };
 
-  shouldLongPoll = function() {
-    return me.alwaysLongPoll || !isHidden();
+  var shouldLongPoll = function() {
+    return (
+      me.alwaysLongPoll ||
+      (me.shouldLongPollCallback ? me.shouldLongPollCallback() : !isHidden())
+    );
   };
 
-  var totalAjaxFailures = 0;
-  var totalAjaxCalls = 0;
-  var lastAjax;
-
   var processMessages = function(messages) {
-    var gotData = false;
-    if (!messages) return false; // server unexpectedly closed connection
+    if ((!messages) || (messages.length === 0)) { return false; }
 
-    for (var i=0; i<messages.length; i++) {
+    for (var i = 0; i < messages.length; i++) {
       var message = messages[i];
-      gotData = true;
-      for (var j=0; j<callbacks.length; j++) {
+      for (var j = 0; j < callbacks.length; j++) {
         var callback = callbacks[j];
         if (callback.channel === message.channel) {
           callback.last_id = message.message_id;
           try {
             callback.func(message.data, message.global_id, message.message_id);
-          }
-          catch(e){
-            if(console.log) {
-              console.log("MESSAGE BUS FAIL: callback " + callback.channel +  " caused exception " + e.message);
+          } catch (e) {
+            if (console.log) {
+              console.log(
+                "MESSAGE BUS FAIL: callback " +
+                  callback.channel +
+                  " caused exception " +
+                  e.stack
+              );
             }
           }
         }
@@ -118,14 +130,14 @@
       }
     }
 
-    return gotData;
+    return true;
   };
 
   var reqSuccess = function(messages) {
     failCount = 0;
     if (paused) {
       if (messages) {
-        for (var i=0; i<messages.length; i++) {
+        for (var i = 0; i < messages.length; i++) {
           later.push(messages[i]);
         }
       }
@@ -135,8 +147,7 @@
     return false;
   };
 
-  longPoller = function(poll, data) {
-
+  var longPoller = function(poll, data) {
     if (ajaxInProgress) {
       // never allow concurrent ajax reqs
       return;
@@ -144,6 +155,9 @@
 
     var gotData = false;
     var aborted = false;
+    var rateLimited = false;
+    var rateLimitedSeconds;
+
     lastAjax = new Date();
     totalAjaxCalls += 1;
     data.__seq = totalAjaxCalls;
@@ -155,21 +169,18 @@
       chunked = false;
     }
 
-    var headers = {
-      'X-SILENCE-LOGGER': 'true'
-    };
-    for (var name in me.headers){
+    var headers = { "X-SILENCE-LOGGER": "true" };
+    for (var name in me.headers) {
       headers[name] = me.headers[name];
     }
 
-    if (!chunked){
-      headers["Dont-Chunk"] = 'true';
+    if (!chunked) {
+      headers["Dont-Chunk"] = "true";
     }
 
     var dataType = chunked ? "text" : "json";
 
     var handle_progress = function(payload, position) {
-
       var separator = "\r\n|\r\n";
       var endChunk = payload.indexOf(separator, position);
 
@@ -182,7 +193,7 @@
 
       try {
         reqSuccess(JSON.parse(chunk));
-      } catch(e) {
+      } catch (e) {
         if (console.log) {
           console.log("FAILED TO PARSE CHUNKED REPLY");
           console.log(data);
@@ -190,31 +201,16 @@
       }
 
       return handle_progress(payload, endChunk + separator.length);
-    }
+    };
 
-    var disableChunked = function(){
+    var disableChunked = function() {
       if (me.longPoll) {
         me.longPoll.abort();
         chunkedBackoff = 30;
       }
     };
 
-    var setOnProgressListener = function(xhr) {
-      var position = 0;
-      // if it takes longer than 3000 ms to get first chunk, we have some proxy
-      // this is messing with us, so just backoff from using chunked for now
-      var chunkedTimeout = setTimeout(disableChunked,3000);
-      xhr.onprogress = function () {
-        clearTimeout(chunkedTimeout);
-        if(xhr.getResponseHeader('Content-Type') === 'application/json; charset=utf-8') {
-          // not chunked we are sending json back
-          chunked = false;
-          return;
-        }
-        position = handle_progress(xhr.responseText, position);
-      }
-    };
-    if (!me.ajax){
+    if (!me.ajax) {
       throw new Error("Either jQuery or the ajax adapter must be loaded");
     }
 
@@ -222,12 +218,17 @@
 
     ajaxInProgress = true;
     var req = me.ajax({
-      url: me.baseUrl + "message-bus/" + me.clientId + "/poll" + (!longPoll ? "?dlp=t" : ""),
+      url:
+        me.baseUrl +
+        "message-bus/" +
+        me.clientId +
+        "/poll" +
+        (!longPoll ? "?dlp=t" : ""),
       data: data,
       cache: false,
       async: true,
       dataType: dataType,
-      type: 'POST',
+      type: "POST",
       headers: headers,
       messageBus: {
         chunked: chunked,
@@ -235,15 +236,18 @@
           var position = 0;
           // if it takes longer than 3000 ms to get first chunk, we have some proxy
           // this is messing with us, so just backoff from using chunked for now
-          var chunkedTimeout = setTimeout(disableChunked,3000);
-          return xhr.onprogress = function () {
+          var chunkedTimeout = setTimeout(disableChunked, 3000);
+          return (xhr.onprogress = function() {
             clearTimeout(chunkedTimeout);
-            if(xhr.getResponseHeader('Content-Type') === 'application/json; charset=utf-8') {
+            if (
+              xhr.getResponseHeader("Content-Type") ===
+              "application/json; charset=utf-8"
+            ) {
               chunked = false; // not chunked, we are sending json back
             } else {
               position = handle_progress(xhr.responseText, position);
             }
-          }
+          });
         }
       },
       xhr: function() {
@@ -255,16 +259,27 @@
         return xhr;
       },
       success: function(messages) {
-         if (!chunked) {
-           // we may have requested text so jQuery will not parse
-           if (typeof(messages) === "string") {
-             messages = JSON.parse(messages);
-           }
-           gotData = reqSuccess(messages);
-         }
-       },
+        if (!chunked) {
+          // we may have requested text so jQuery will not parse
+          if (typeof messages === "string") {
+            messages = JSON.parse(messages);
+          }
+          gotData = reqSuccess(messages);
+        }
+      },
       error: function(xhr, textStatus, err) {
-        if(textStatus === "abort") {
+        if (xhr.status === 429) {
+          var tryAfter =
+            parseInt(
+              xhr.getResponseHeader && xhr.getResponseHeader("Retry-After")
+            ) || 0;
+          tryAfter = tryAfter || 0;
+          if (tryAfter < 15) {
+            tryAfter = 15;
+          }
+          rateLimitedSeconds = tryAfter;
+          rateLimited = true;
+        } else if (textStatus === "abort") {
           aborted = true;
         } else {
           failCount += 1;
@@ -272,13 +287,14 @@
         }
       },
       complete: function() {
-
         ajaxInProgress = false;
 
         var interval;
         try {
-          if (gotData || aborted) {
-            interval = 100;
+          if (rateLimited) {
+            interval = Math.max(me.minPollInterval, rateLimitedSeconds * 1000);
+          } else if (gotData || aborted) {
+            interval = me.minPollInterval;
           } else {
             interval = me.callbackInterval;
             if (failCount > 2) {
@@ -290,14 +306,14 @@
               interval = me.maxPollInterval;
             }
 
-            interval -= (new Date() - lastAjax);
+            interval -= new Date() - lastAjax;
 
             if (interval < 100) {
               interval = 100;
             }
           }
-        } catch(e) {
-          if(console.log && e.message) {
+        } catch (e) {
+          if (console.log && e.message) {
             console.log("MESSAGE BUS FAIL: " + e.message);
           }
         }
@@ -308,7 +324,7 @@
         }
 
         if (started) {
-          pollTimeout = setTimeout(function(){
+          pollTimeout = setTimeout(function() {
             pollTimeout = null;
             poll();
           }, interval);
@@ -328,23 +344,30 @@
     enableLongPolling: true,
     callbackInterval: 15000,
     backgroundCallbackInterval: 60000,
+    minPollInterval: 100,
     maxPollInterval: 3 * 60 * 1000,
     callbacks: callbacks,
     clientId: clientId,
     alwaysLongPoll: false,
+    shouldLongPollCallback: undefined,
     baseUrl: baseUrl,
     headers: {},
-    ajax: (jQuery && jQuery.ajax),
-    noConflict: function(){
-      global.MessageBus = global.MessageBus.previousMessageBus;
-      return this;
-    },
-    diagnostics: function(){
+    ajax: typeof jQuery !== "undefined" && jQuery.ajax,
+    diagnostics: function() {
       console.log("Stopped: " + stopped + " Started: " + started);
       console.log("Current callbacks");
       console.log(callbacks);
-      console.log("Total ajax calls: " + totalAjaxCalls + " Recent failure count: " + failCount + " Total failures: " + totalAjaxFailures);
-      console.log("Last ajax call: " + (new Date() - lastAjax) / 1000  + " seconds ago") ;
+      console.log(
+        "Total ajax calls: " +
+          totalAjaxCalls +
+          " Recent failure count: " +
+          failCount +
+          " Total failures: " +
+          totalAjaxFailures
+      );
+      console.log(
+        "Last ajax call: " + (new Date() - lastAjax) / 1000 + " seconds ago"
+      );
     },
 
     pause: function() {
@@ -371,21 +394,17 @@
 
     // Start polling
     start: function() {
-      var poll;
-
       if (started) return;
       started = true;
       stopped = false;
 
-      poll = function() {
-        var data;
-
-        if(stopped) {
+      var poll = function() {
+        if (stopped) {
           return;
         }
 
         if (callbacks.length === 0 || hiddenTabShouldWait()) {
-          if(!delayPollTimeout) {
+          if (!delayPollTimeout) {
             delayPollTimeout = setTimeout(function() {
               delayPollTimeout = null;
               poll();
@@ -394,8 +413,8 @@
           return;
         }
 
-        data = {};
-        for (var i=0;i<callbacks.length;i++) {
+        var data = {};
+        for (var i = 0; i < callbacks.length; i++) {
           data[callbacks[i].channel] = callbacks[i].last_id;
         }
 
@@ -406,30 +425,31 @@
         }
       };
 
-
       // monitor visibility, issue a new long poll when the page shows
-      if(document.addEventListener && 'hidden' in document){
-        me.visibilityEvent = global.document.addEventListener('visibilitychange', function(){
-          if(!document.hidden && !me.longPoll && pollTimeout){
+      if (document.addEventListener && "hidden" in document) {
+        me.visibilityEvent = document.addEventListener(
+          "visibilitychange",
+          function() {
+            if (!document.hidden && !me.longPoll && pollTimeout) {
+              clearTimeout(pollTimeout);
+              clearTimeout(delayPollTimeout);
 
-            clearTimeout(pollTimeout);
-            clearTimeout(delayPollTimeout);
-
-            delayPollTimeout = null;
-            pollTimeout = null;
-            poll();
+              delayPollTimeout = null;
+              pollTimeout = null;
+              poll();
+            }
           }
-        });
+        );
       }
 
       poll();
     },
 
-    "status": function() {
+    status: function() {
       if (paused) {
-         return "paused";
+        return "paused";
       } else if (started) {
-         return "started";
+        return "started";
       } else if (stopped) {
         return "stopped";
       } else {
@@ -439,21 +459,23 @@
 
     // Subscribe to a channel
     // if lastId is 0 or larger, it will recieve messages AFTER that id
-    // if lastId is nagative it will perform lookbehind"
+    // if lastId is negative it will perform lookbehind
     // -1 will subscribe to all new messages
     // -2 will recieve last message + all new messages
     // -3 will recieve last 2 messages + all new messages
+    // if undefined will default to -1
     subscribe: function(channel, func, lastId) {
-
-      if(!started && !stopped){
+      if (!started && !stopped) {
         me.start();
       }
 
-      if (typeof(lastId) !== "number") {
+      if (lastId === null || typeof lastId === "undefined") {
         lastId = -1;
+      } else if (typeof lastId !== "number") {
+        throw "lastId has type " + typeof lastId + " but a number was expected.";
       }
 
-      if (typeof(channel) !== "string") {
+      if (typeof channel !== "string") {
         throw "Channel name must be a string!";
       }
 
@@ -474,7 +496,7 @@
       // TODO allow for globbing in the middle of a channel name
       // like /something/*/something
       // at the moment we only support globbing /something/*
-      var glob;
+      var glob = false;
       if (channel.indexOf("*", channel.length - 1) !== -1) {
         channel = channel.substr(0, channel.length - 1);
         glob = true;
@@ -482,8 +504,7 @@
 
       var removed = false;
 
-      for (var i=callbacks.length-1; i>=0; i--) {
-
+      for (var i = callbacks.length - 1; i >= 0; i--) {
         var callback = callbacks[i];
         var keep;
 
@@ -493,12 +514,12 @@
           keep = callback.channel !== channel;
         }
 
-        if(!keep && func && callback.func !== func){
+        if (!keep && func && callback.func !== func) {
           keep = true;
         }
 
         if (!keep) {
-          callbacks.splice(i,1);
+          callbacks.splice(i, 1);
           removed = true;
         }
       }
@@ -510,5 +531,5 @@
       return removed;
     }
   };
-  global.MessageBus = me;
-})(window, document);
+  return me;
+}));

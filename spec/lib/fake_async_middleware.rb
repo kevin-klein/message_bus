@@ -1,7 +1,7 @@
+# frozen_string_literal: true
 require 'http/parser'
 class FakeAsyncMiddleware
-
-  def initialize(app,config={})
+  def initialize(app, config = {})
     @app = app
     @bus = config[:message_bus] || MessageBus
     @simulate_thin_async = false
@@ -31,7 +31,6 @@ class FakeAsyncMiddleware
     @in_async
   end
 
-
   def simulate_thin_async?
     @simulate_thin_async && @bus.long_polling_enabled?
   end
@@ -55,7 +54,7 @@ class FakeAsyncMiddleware
 
   def translate_io_result(io)
     data = io.string
-    body = ""
+    body = +""
 
     parser = Http::Parser.new
     parser.on_body = proc { |chunk| body << chunk }
@@ -63,7 +62,6 @@ class FakeAsyncMiddleware
 
     [parser.status_code, parser.headers, [body]]
   end
-
 
   def call_rack_hijack(env)
     # this is not to spec, the spec actually return, but here we will simply simulate and block
@@ -106,7 +104,6 @@ class FakeAsyncMiddleware
 
     @in_async = false
     result || [500, {}, ['timeout']]
-
   end
 
   def call_thin_async(env)
@@ -116,7 +113,7 @@ class FakeAsyncMiddleware
         # more judo with deferrable body, at this point we just have headers
         r[2].callback do
           # even more judo cause rack test does not call each like the spec says
-          body = ""
+          body = +""
           r[2].each do |m|
             body << m
           end
@@ -147,4 +144,3 @@ class FakeAsyncMiddleware
     result || [500, {}, ['timeout']]
   end
 end
-
